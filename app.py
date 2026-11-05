@@ -1,146 +1,238 @@
+
 import cv2
 import mediapipe as mp
 import time
+import streamlit as st
+import threading
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-# ---------------- MEDIAPIPE SETUP ----------------
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(
-    max_num_hands=2,
-    min_detection_confidence=0.7,
-    min_tracking_confidence=0.7
+st.set_page_config(
+    page_title="Sign Language Recognition",
+    page_icon="🤟",
+    layout="wide"
 )
-mp_draw = mp.solutions.drawing_utils
 
-# ---------------- CAMERA ----------------
-cap = cv2.VideoCapture(0)
+st.title("🤟 Real-Time Sign Language Recognition")
+st.write("Recognize hand numbers and basic sign gestures.")
 
-mode = "NUMBER"
-word = ""
-last_letter = ""
-last_time = time.time()
+VALID_WORDS = ["BAD", "LAD", "DAY", "BEE", "LIVE", "YELL", "BALL"]
 
-# Simple dictionary
-valid_words = ["BAD", "LAD", "DAY", "BEE", "LIVE", "YELL", "BALL"]
 
-while True:
-    success, img = cap.read()
-    if not success:
-        break
+class SignLanguageProcessor(VideoProcessorBase):
 
-    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    results = hands.process(img_rgb)
+    def __init__(self):
+        self.mp_hands = mp.solutions.hands
+        self.mp_draw = mp.solutions.drawing_utils
 
-    total_fingers = 0
-    gesture = ""
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=2,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
+        )
 
-    if results.multi_hand_landmarks and results.multi_handedness:
+        self.mode = "NUMBER"
+        self.word = ""
+        self.last_letter = ""
+        self.last_time = 0
+        self.lock = threading.Lock()
 
-        for hand_index, handLms in enumerate(results.multi_hand_landmarks):
+    def reset_word(self):
+        with self.lock:
+            self.word = ""
+            self.last_letter = ""
+            self.last_time = 0
 
-            mp_draw.draw_landmarks(img, handLms, mp_hands.HAND_CONNECTIONS)
+    def recognize_letter(self, f):
 
-            hand_label = results.multi_handedness[hand_index].classification[0].label
-            landmarks = handLms.landmark
-            fingers = []
+        gestures = {
+            (0, 0, 0, 0, 0): "A",
+            (0, 1, 1, 1, 1): "B",
+            (0, 1, 0, 0, 0): "D",
+            (1, 0, 0, 0, 0): "E",
+            (1, 1, 0, 0, 0): "L",
+            (0, 1, 1, 0, 0): "V",
+            (1, 0, 0, 0, 1): "Y",
+            (0, 0, 0, 0, 1): "I"
+        }
 
-            # ---- THUMB (Correct for left & right) ----
-            if hand_label == "Right":
-                fingers.append(1 if landmarks[4].x < landmarks[3].x else 0)
-            else:
-                fingers.append(1 if landmarks[4].x > landmarks[3].x else 0)
+        return gestures.get(tuple(f), "")
 
-            # ---- OTHER FINGERS ----
-            tip_ids = [8, 12, 16, 20]
-            for tip in tip_ids:
-                fingers.append(1 if landmarks[tip].y < landmarks[tip - 2].y else 0)
+    def recv(self, frame):
 
-            total_fingers += sum(fingers)
+        img = frame.to_ndarray(format="bgr24")
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # ================= NUMBER MODE =================
-        if mode == "NUMBER":
-            cv2.putText(img, f'Number: {total_fingers}', (50, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 255, 0), 4)
+        results = self.hands.process(img_rgb)
 
-        # ================= LETTER MODE =================
-        elif mode == "LETTER":
+        total_fingers = 0
+        gesture = ""
 
-            # Use first detected hand for letter recognition
-            f = fingers
+        first_hand_fingers = None
 
-            if f == [0,0,0,0,0]:
-                gesture = "A"
+        if results.multi_hand_landmarks:
 
-            elif f == [0,1,1,1,1]:
-                gesture = "B"
+            for index, handLms in enumerate(results.multi_hand_landmarks):
 
-            elif f == [0,1,0,0,0]:
-                gesture = "D"
+                self.mp_draw.draw_landmarks(
+                    img,
+                    handLms,
+                    self.mp_hands.HAND_CONNECTIONS
+                )
 
-            elif f == [1,0,0,0,0]:
-                gesture = "E"
+                landmarks = handLms.landmark
 
-            elif f == [1,1,0,0,0]:
-                gesture = "L"
+                hand_label = (
+                    results.multi_handedness[index]
+                    .classification[0].label
+                )
 
-            elif f == [0,1,1,0,0]:
-                gesture = "V"
+                fingers = []
 
-            elif f == [1,0,0,0,1]:
-                gesture = "Y"
+                # Thumb
+                if hand_label == "Right":
+                    fingers.append(
+                        1 if landmarks[4].x < landmarks[3].x else 0
+                    )
+                else:
+                    fingers.append(
+                        1 if landmarks[4].x > landmarks[3].x else 0
+                    )
 
-            elif f == [0,0,0,0,1]:
-                gesture = "I"
+                # Other fingers
+                for tip in [8, 12, 16, 20]:
+                    fingers.append(
+                        1 if landmarks[tip].y <
+                        landmarks[tip - 2].y else 0
+                    )
 
-            else:
-                gesture = ""
+                total_fingers += sum(fingers)
 
-            current_time = time.time()
+                if index == 0:
+                    first_hand_fingers = fingers
 
-            if gesture != "" and gesture != last_letter:
-                if current_time - last_time > 2:
-                    word += gesture
-                    last_letter = gesture
-                    last_time = current_time
+        with self.lock:
+            mode = self.mode
 
-            cv2.putText(img, f'Letter: {gesture}', (50, 100),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.8, (255, 0, 0), 4)
+            if mode == "NUMBER":
+                cv2.putText(
+                    img,
+                    f"Number: {total_fingers}",
+                    (50, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.8,
+                    (0, 255, 0),
+                    4
+                )
 
-    # Show Word
-    if mode == "LETTER":
-        cv2.putText(img, f'Word: {word}', (50, 180),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 0), 3)
+            elif mode == "LETTER":
 
-        # Word checking
-        if len(word) > 0:
-            if word in valid_words:
-                cv2.putText(img, "VALID WORD", (50, 260),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-            else:
-                cv2.putText(img, "NOT IN DICTIONARY", (50, 260),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
+                if first_hand_fingers is not None:
+                    gesture = self.recognize_letter(
+                        first_hand_fingers
+                    )
 
-    # Show Mode
-    cv2.putText(img, f'Mode: {mode}', (50, 330),
-                cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 2)
+                current_time = time.time()
 
-    cv2.imshow("Multi-Hand Counter + Gesture Recognition", img)
+                if gesture:
+                    if (
+                        gesture != self.last_letter
+                        and current_time - self.last_time > 2
+                    ):
+                        self.word += gesture
+                        self.last_letter = gesture
+                        self.last_time = current_time
+                else:
+                    self.last_letter = ""
 
-    key = cv2.waitKey(1) & 0xFF
+                cv2.putText(
+                    img,
+                    f"Letter: {gesture}",
+                    (50, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.8,
+                    (255, 0, 0),
+                    4
+                )
 
-    # Switch modes
-    if key == ord('n'):
-        mode = "NUMBER"
+                cv2.putText(
+                    img,
+                    f"Word: {self.word}",
+                    (50, 180),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2,
+                    (255, 255, 0),
+                    3
+                )
 
-    if key == ord('l'):
-        mode = "LETTER"
+                if self.word:
+                    status = (
+                        "VALID WORD"
+                        if self.word in VALID_WORDS
+                        else "NOT IN DICTIONARY"
+                    )
 
-    # Clear word
-    if key == ord('c'):
-        word = ""
+                    color = (
+                        (0, 255, 0)
+                        if status == "VALID WORD"
+                        else (0, 0, 255)
+                    )
 
-    # Quit
-    if key == ord('q'):
-        break
+                    cv2.putText(
+                        img,
+                        status,
+                        (50, 260),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1.0,
+                        color,
+                        3
+                    )
 
-cap.release()
-cv2.destroyAllWindows()
+            cv2.putText(
+                img,
+                f"Mode: {mode}",
+                (50, 330),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1.2,
+                (255, 255, 255),
+                2
+            )
+
+        return frame.from_ndarray(img, format="bgr24")
+
+
+st.subheader("Select Recognition Mode")
+
+mode = st.radio(
+    "Mode",
+    ["NUMBER", "LETTER"],
+    horizontal=True
+)
+
+ctx = webrtc_streamer(
+    key="sign-language-camera",
+    video_processor_factory=SignLanguageProcessor,
+    media_stream_constraints={
+        "video": True,
+        "audio": False
+    },
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]}
+        ]
+    }
+)
+
+if ctx.video_processor:
+    ctx.video_processor.mode = mode
+
+    if st.button("Clear Word"):
+        ctx.video_processor.reset_word()
+
+st.caption(
+    "Allow camera permission in your browser to start recognition."
+)
+
+st.info(
+    "NUMBER mode: Count fingers on both hands. "
+    "LETTER mode: Recognize supported gestures and form words."
+)
